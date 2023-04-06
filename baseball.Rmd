@@ -1,0 +1,919 @@
+---
+title: 'STAT 139: Final Project'
+author: "Danny Kim, Christopher Lee, Karina Wang, Daniel Son"
+date: "2022-12-14"
+output: pdf_document
+---
+
+```{r, include=FALSE, set.seed(139)}
+knitr::opts_chunk$set(echo = TRUE, cache=TRUE)
+```
+
+## EDA
+```{r, cache=TRUE}
+set.seed(139)
+library(dplyr)
+# Load team data
+team_data = list()
+team_wins <- list()
+drop = c("W", "L")
+for (year in 1997:2022) {
+  df1 = read.csv(paste("data/teams_data/batting", year, ".csv", sep=""))
+  df2 = read.csv(paste("data/teams_data/pitching", year, ".csv", sep=""))
+  df3 = read.csv(paste("data/teams_data/fielding", year, ".csv", sep=""))
+  df_tot = merge(merge(df1, df2, by="Tm", suffixes=c(".bat", ".pitch")), df3, by="Tm", suffixes=c("", ".field"))
+  
+  df_tot = df_tot[
+    !(df_tot$Tm %in% c("", "League Average")),
+    !(names(df_tot) %in% drop)
+  ]
+  df_tot$Tm = factor(df_tot$Tm)
+  team_data[[year]] = df_tot
+  team_wins[[year]] = df_tot[, c("Tm", "W.L.")]
+}
+
+# Load player data
+years <- 1997:2022
+bps <- c("batting", "pitching", "fielding")
+player_data <- list()
+for (year in years) {
+  player_data[[year]] <- list()
+  for (bp in bps) {
+    player_data[[year]][[bp]] <- read.csv(paste("data/player_data/", bp, year, ".csv", sep=""))
+    quant_cols <- names(select_if(player_data[[year]][[bp]], is.numeric))
+    for (col in quant_cols) {
+      # impute data with mean
+      df <- player_data[[year]][[bp]]
+      player_data[[year]][[bp]][is.na(player_data[[year]][[bp]][,col]),col] <- mean(df[,col], na.rm=TRUE)
+    }
+  }
+}
+
+fa_data = list()
+for (year in years) {
+  fa_data[[year]] = read.csv(paste("data/fa_data/fa", year, ".csv", sep=""))
+  fa_data[[year]]$WAR3[is.na(fa_data[[year]]$WAR3)] = 0
+}
+```
+
+```{r, cache=TRUE}
+set.seed(139)
+# Data Cleaning for the Team Data
+team_wins <- list()
+for (year in years) {
+  team_wins[[year]] <- team_data[[year]][!(team_data[[year]]$Tm %in% c("", "League Average")), c("Tm", "W.L.")]
+}
+```
+
+```{r, cache=TRUE}
+set.seed(139)
+# Clean player data
+for (year in years) {
+  for (bp in bps) {
+    player_data[[year]][[bp]]$year <- year
+    player_data[[year]][[bp]]$year_adj <- year - 1997
+  }
+}
+
+for (year in years) {
+  player_data[[year]][["pitching"]] = player_data[[year]][["pitching"]][!is.infinite(player_data[[year]][["pitching"]]$ERA),]
+}
+
+long_team_names <- team_data[[year]][!(team_data[[year]]$Tm %in% c("", "League Average")),]$Tm
+short_team_names <- c("ARI", "ATL", "BAL", "BOS", "CHC", "CHW", "CIN", "CLE", "COL", "DET",
+                      "HOU", "KCR", "LAA", "LAD", "MIA", "MIL", "MIN", "NYM", "NYY", "OAK",
+                      "PHI", "PIT", "SDP", "SFG", "SEA", "STL", "TBR", "TEX", "TOR", "WSN")
+agg_data <- list()
+for (year in years) {
+  agg_data[[year]] <- list()
+  for (bp in bps) {
+    quant_cols <- names(select_if(player_data[[year]][[bp]], is.numeric))
+    agg_data[[year]][[bp]] <- player_data[[year]][[bp]][, c("Tm", quant_cols)] %>% 
+      group_by(Tm) %>%
+      summarise(across(quant_cols, ~weighted.mean(., w = G)))
+    agg_data[[year]][[bp]] <- agg_data[[year]][[bp]][!(agg_data[[year]][[bp]]$Tm == "TOT"),]
+    agg_data[[year]][[bp]]$long_Tm <- factor(
+      agg_data[[year]][[bp]]$Tm,
+      levels=short_team_names,
+      labels=long_team_names
+    )
+  }
+}
+
+player_combo <- list()
+for (year in years) {
+  player_combo[[year]] <- merge(merge(agg_data[[year]][[bps[1]]], agg_data[[year]][[bps[2]]], by="Tm", suffixes=c(".bat", ".pitch")), agg_data[[year]][[bps[3]]], by="Tm", suffixes=c("", ".field"))
+}
+
+agg_fa_data <- list()
+for (year in years) {
+  agg_fa_data[[year]] = fa_data[[year]] %>% group_by(To.Team) %>% summarise(tot_fa_war3=sum(WAR3), num_fas=n())
+}
+
+# add response variable to player data
+player_with_wins <- list()
+for (year in 1997:2021) {
+  player_with_wins[[year]] <- merge(player_combo[[year]], team_wins[[year+1]], by.x="long_Tm.pitch", by.y="Tm", suffixes=c(".same_year", ".next_year"))
+}
+
+player_with_wins_fa <- list()
+for (year in 1997:2021) {
+  player_with_wins_fa[[year]] <- merge(player_with_wins[[year]], agg_fa_data[[year]], by.x="long_Tm.pitch", by.y="To.Team")
+}
+
+
+player_with_wins_combined = bind_rows(player_with_wins_fa, )
+player_with_wins_combined$W.L..same_year = 100 * player_with_wins_combined$W.L..same_year
+player_with_wins_combined$W.L..next_year = 100 * player_with_wins_combined$W.L..next_year
+
+drop_cols = c("long_Tm.pitch", "Rk.bat", "G.bat", "long_Tm.bat", "Rk.pitch", "W", "L", "G.pitch", "long_Tm",
+              "Age", "GS", "CG", "GS.field", "CG.field", "Rdrs", "Rdrs.yr", "Rgood")
+player_with_wins_combined = player_with_wins_combined[, !(names(player_with_wins_combined) %in% drop_cols)]
+
+n.rows = nrow(player_with_wins_combined)
+n.train = 0.8 * n.rows
+train.rows = sample(n.rows, n.train)
+train.df = player_with_wins_combined[train.rows,]
+colnames(train.df)[colnames(train.df) == 'OPS.'] <- 'OPSplus'
+colnames(train.df)[colnames(train.df) == 'ERA.'] <- 'ERAplus'
+test.df = player_with_wins_combined[-train.rows,]
+colnames(test.df)[colnames(test.df) == 'OPS.'] <- 'OPSplus'
+colnames(test.df)[colnames(test.df) == 'ERA.'] <- 'ERAplus'
+```
+
+```{r, cache=TRUE}
+set.seed(139)
+# train.df
+names(train.df)
+```
+
+
+```{r, cache=TRUE}
+set.seed(139)
+# Explore Potential Predictors
+par(mfrow=c(3,4))
+plot(W.L..next_year ~ Age.bat, data=train.df,
+     xlab="Batters' Avg. Age", ylab="Winning %", cex=0.3)
+plot(W.L..next_year ~ Age.pitch, data=train.df,
+     xlab="Pitchers' Avg. Age", ylab="Winning %", cex=0.3)
+plot(W.L..next_year ~ BA, data=train.df,
+     xlab="Batting Avg.", ylab="Winning %", cex=0.3)
+plot(W.L..next_year ~ HR.bat, data=train.df,
+     xlab="Avg. Home Runs", ylab="Winning %", cex=0.3)
+plot(W.L..next_year ~ OPSplus, data=train.df,
+     xlab="Adjusted OPS", ylab="Winning Percentage", cex=0.3)
+plot(W.L..next_year ~ SO.W, data=train.df,
+     xlab="Avg. Strikeout/Walk", ylab="Winning %", cex=0.3)
+plot(W.L..next_year ~ HR9, data=train.df,
+     xlab="Avg. HR/9", ylab="Winning %", cex=0.3)
+plot(W.L..next_year ~ WHIP, data=train.df,
+     xlab="WHIP", ylab="Winning %", cex=0.3)
+plot(W.L..next_year ~ tot_fa_war3, data=train.df,
+     xlab="Total Free Agent WAR3", ylab="Winning %", cex=0.3)
+plot(W.L..next_year ~ E, data=train.df,
+     xlab="Errors", ylab="Winning %", cex=0.3)
+plot(W.L..next_year ~ Fld., data=train.df,
+     xlab="Fielding %", ylab="Winning %", cex=0.3)
+```
+
+```{r, cache=TRUE}
+set.seed(139)
+# Summary statistics for winpct
+summary(train.df$W.L..next_year)
+
+# Histogram for winpct
+hist(train.df$W.L..next_year, main="Distribution of Winning Percentage",
+     xlab="Winning Percentage")
+```
+
+```{r, cache=TRUE}
+set.seed(139)
+# Correlation matrix
+cor(train.df[, c("W.L..next_year", "Age.bat", "Age.pitch", "BA", "HR.bat", "OPS", "SO.W", "HR9", "WHIP", "tot_fa_war3", "E", "Fld.")])
+cor(train.df[, c("W.L..next_year", "Age.bat", "Age.pitch", "BA", "HR.bat", "OPS", "SO.W", "HR9", "WHIP", "tot_fa_war3", "E", "Fld.")])^2
+```
+
+
+```{r, cache=TRUE}
+set.seed(139)
+# Baseline Multiple Regression Model
+baseline <- lm(W.L..next_year ~ Age.bat + Age.pitch + BA + HR.bat + 
+                 OPS + SO.W + HR9 + WHIP + tot_fa_war3 + E + Fld. , data = train.df)
+summary(baseline)
+```
+
+
+```{r, cache=TRUE}
+set.seed(139)
+# Asssess Linear Model Assumptions
+plot(baseline, which=c(1,2))
+```
+
+
+```{r, cache=TRUE}
+set.seed(139)
+RMSE <- function(y,yhat){
+  SSE = sum((y-yhat)^2)
+  SST = sum((y - mean(y))^2)
+  return(sqrt(SSE/length(y)))  
+}
+
+R2 <- function(y,yhat) {
+  SSE = sum((y-yhat)^2)
+  SST = sum((y-mean(y))^2)
+  r.squared <- 1 - (SSE / SST)
+  return(r.squared)
+}
+# baseline RMSEs and R squared values
+baseline.trainRMSE = RMSE(train.df$W.L..next_year, predict(baseline, newdata=train.df))
+baseline.testRMSE = RMSE(test.df$W.L..next_year, predict(baseline, newdata=test.df))
+baseline.trainR2 = R2(train.df$W.L..next_year, predict(baseline, newdata=train.df))
+baseline.testR2 = R2(test.df$W.L..next_year, predict(baseline, newdata=test.df))
+```
+
+## Linear Regression
+
+```{r, cache=TRUE}
+set.seed(139)
+colnames(train.df)
+```
+
+```{r, cache=TRUE}
+set.seed(139)
+# full linear regression models
+
+# ignore Rk.bat, R.bat, RBI, year.bat, year_adj.bat, W, L, R.pitch, year.pitch
+# year_adj.pitch, Rk, WL..next_year, year, year_adj, ERA, ERAplus
+# Rtot, Rtot.yr, Rdrs, Rgood (hard to interpret)
+lm.full <- lm(W.L..next_year ~ Age.bat + PA + AB + H.bat + X2B + X3B + 
+                HR.bat + SB + CS + BB.bat + SO.bat + BA + OBP + SLG + OPS + OPSplus +
+                TB + GDP + HBP.bat + SH + SF + IBB.bat + Age.pitch + W.L..same_year + 
+                GF + SHO + SV + IP + H.pitch + HR.pitch + 
+                BB.pitch + IBB.pitch + SO.pitch + HBP.pitch + BK + WP + BF +
+                FIP + WHIP + H9 + HR9 + BB9 + SO9 + SO.W + 
+                G + Inn + Ch + PO + A + E + DP + Fld. + 
+                RF.9 + RF.G + tot_fa_war3 + num_fas,
+              data = train.df)
+# full linear model RMSEs and R squared values
+lmfull.trainRMSE = RMSE(train.df$W.L..next_year, predict(lm.full, newdata=train.df))
+lmfull.testRMSE = RMSE(test.df$W.L..next_year, predict(lm.full, newdata=test.df))
+lmfull.trainR2 = R2(train.df$W.L..next_year, predict(lm.full, newdata=train.df))
+lmfull.testR2 = R2(test.df$W.L..next_year, predict(lm.full, newdata=test.df))
+
+lm.fullinteraction <- lm(W.L..next_year ~ (Age.bat + PA + AB + H.bat + X2B + X3B + 
+                HR.bat + SB + CS + BB.bat + SO.bat + BA + OBP + SLG + OPS + OPSplus +
+                TB + GDP + HBP.bat + SH + SF + IBB.bat + Age.pitch + W.L..same_year + 
+                GF + SHO + SV + IP + H.pitch + HR.pitch + 
+                BB.pitch + IBB.pitch + SO.pitch + HBP.pitch + BK + WP + BF +
+                FIP + WHIP + H9 + HR9 + BB9 + SO9 + SO.W + 
+                G + Inn + Ch + PO + A + E + DP + Fld. + 
+                RF.9 + RF.G + tot_fa_war3 + num_fas)^2, data = train.df)
+# full linear model with interaction terms RMSEs and R squared values
+lmfullinteraction.trainRMSE = RMSE(train.df$W.L..next_year, predict(lm.fullinteraction, newdata=train.df))
+lmfullinteraction.testRMSE = RMSE(test.df$W.L..next_year, predict(lm.fullinteraction, newdata=test.df))
+lmfullinteraction.trainR2 = R2(train.df$W.L..next_year, predict(lm.fullinteraction, newdata=train.df))
+lmfullinteraction.testR2 = R2(test.df$W.L..next_year, predict(lm.fullinteraction, newdata=test.df))
+```
+
+```{r, cache=TRUE}
+set.seed(139)
+# Ridge Regression
+
+library(glmnet)
+library(caret)
+# regularize full model
+X.full = model.matrix(lm.full)[,-1] # drop intercept
+best_lambda = cv.glmnet(X.full, train.df$W.L..next_year, alpha=0, lambda=10^seq(-4, 4, 0.1))$lambda.min; best_lambda
+ridges.full = glmnet(X.full, train.df$W.L..next_year, alpha=0, 
+                     lambda=best_lambda)
+imp <- as.data.frame(varImp(ridges.full, lambda=best_lambda))
+imp <- data.frame(overall = imp$Overall,
+           names = rownames(imp))
+imp[order(imp$overall,decreasing = T),][1:10,]
+X.full.test = model.matrix(lm.full, data=test.df)[,-1] # drop intercept
+
+yhats.full.train = predict(ridges.full, X.full)
+ridgesfull.trainRMSE = RMSE(train.df$W.L..next_year, yhats.full.train) # train RMSE
+ridgesfull.trainR2 = R2(train.df$W.L..next_year, yhats.full.train) # train R2
+
+yhats.full.test = predict(ridges.full, X.full.test)
+#plot(RMSE.ridges.full.test~log(ridges.full$lambda, 10), type='l')
+ridgesfull.testRMSE = RMSE(test.df$W.L..next_year, yhats.full.test) # test RMSE
+ridgesfull.testR2 = R2(test.df$W.L..next_year, yhats.full.test) # test R2
+```
+
+```{r, cache=TRUE}
+set.seed(139)
+# regularize full interaction model
+X.fullinteraction = model.matrix(lm.fullinteraction)[,-1] # drop intercept
+
+best_lambda = cv.glmnet(X.fullinteraction, train.df$W.L..next_year, alpha=0, 
+                        lambda=10^seq(-4, 4, 0.1))$lambda.min; best_lambda
+ridges.fullinteraction = glmnet(X.fullinteraction, train.df$W.L..next_year, alpha=0, 
+                     lambda=best_lambda)
+imp <- as.data.frame(varImp(ridges.fullinteraction, lambda=best_lambda))
+imp <- data.frame(overall = imp$Overall,
+           names = rownames(imp))
+imp[order(imp$overall,decreasing = T),][1:10,]
+X.fullinteraction.test = model.matrix(lm.fullinteraction, data=test.df)[,-1] # drop intercept
+
+yhats.fullinteraction.train = predict(ridges.fullinteraction, X.fullinteraction)
+ridgesfullinteraction.trainRMSE = RMSE(train.df$W.L..next_year, yhats.fullinteraction.train) # train RMSE
+ridgesfullinteraction.trainR2 = R2(train.df$W.L..next_year, yhats.fullinteraction.train) # train R2
+
+yhats.fullinteraction.test = predict(ridges.fullinteraction, X.fullinteraction.test)
+#plot(RMSE.ridges.fullinteraction.test~log(ridges.fullinteraction$lambda, 10), type='l')
+ridgesfullinteraction.testRMSE = RMSE(test.df$W.L..next_year, yhats.fullinteraction.test) # train RMSE
+ridgesfullinteraction.testR2 = R2(test.df$W.L..next_year, yhats.fullinteraction.test) # train R2
+```
+
+```{r, cache=TRUE}
+set.seed(139)
+# Lasso Regression
+# regularize full model
+
+best_lambda = cv.glmnet(X.full, train.df$W.L..next_year, alpha=1, 
+                        lambda=10^seq(-4, 4, 0.1))$lambda.min; best_lambda
+lassos.full = glmnet(X.full, train.df$W.L..next_year, alpha=1, 
+                     lambda=best_lambda)
+imp <- as.data.frame(varImp(lassos.full, lambda=best_lambda))
+imp <- data.frame(overall = imp$Overall,
+           names = rownames(imp))
+imp[order(imp$overall,decreasing = T),][1:10,]
+yhats.full.train = predict(lassos.full, X.full)
+lassosfull.trainRMSE = RMSE(train.df$W.L..next_year, yhats.full.train) # train RMSE
+lassosfull.trainR2 = R2(train.df$W.L..next_year, yhats.full.train) # train R2
+
+yhats.full.test = predict(lassos.full, X.full.test)
+#plot(RMSE.lassos.full.test~log(ridges.full$lambda, 10), type='l')
+lassosfull.testRMSE = RMSE(test.df$W.L..next_year, yhats.full.test) # test RMSE
+lassosfull.testR2 = R2(test.df$W.L..next_year, yhats.full.test) # test RMSE
+```
+
+```{r, cache=TRUE}
+set.seed(139)
+# regularize full interaction model
+
+best_lambda = cv.glmnet(X.fullinteraction, train.df$W.L..next_year, alpha=1, 
+                        lambda=10^seq(-4, 4, 0.1))$lambda.min; best_lambda
+lassos.fullinteraction = glmnet(X.fullinteraction, train.df$W.L..next_year, alpha=1, 
+                     lambda=best_lambda)
+imp <- as.data.frame(varImp(lassos.fullinteraction, lambda=best_lambda))
+imp <- data.frame(overall = imp$Overall,
+           names = rownames(imp))
+imp[order(imp$overall,decreasing = T),][1:10,]
+yhats.fullinteraction.train = predict(lassos.fullinteraction, X.fullinteraction)
+lassosfullinteraction.trainRMSE = RMSE(train.df$W.L..next_year, yhats.fullinteraction.train) # train RMSE
+lassosfullinteraction.trainR2 = R2(train.df$W.L..next_year, yhats.fullinteraction.train) # train R2
+
+yhats.fullinteraction.test = predict(lassos.fullinteraction, X.fullinteraction.test)
+#plot(RMSE.lassos.fullinteraction.test~log(lassos.fullinteraction$lambda, 10), type='l')
+lassosfullinteraction.testRMSE = RMSE(test.df$W.L..next_year, yhats.fullinteraction.test) # train RMSE
+lassosfullinteraction.testR2 = R2(test.df$W.L..next_year, yhats.fullinteraction.test) # train R2
+```
+
+```{r, cache=TRUE}
+set.seed(139)
+# Stepwise
+lm.step = step(lm.full, scope=c(lower=formula(W.L..next_year~1), 
+                                upper=lm.fullinteraction), trace=0, direction="both")
+formula(lm.step)
+imp <- as.data.frame(varImp(lm.step))
+imp <- data.frame(overall = imp$Overall,
+           names = rownames(imp))
+imp[order(imp$overall,decreasing = T),][1:10,]
+lmstep.trainRMSE = RMSE(train.df$W.L..next_year, predict(lm.step, newdata=train.df))
+lmstep.testRMSE = RMSE(test.df$W.L..next_year, predict(lm.step, newdata=test.df))
+lmstep.trainR2 = R2(train.df$W.L..next_year, predict(lm.step, newdata=train.df))
+lmstep.testR2 = R2(test.df$W.L..next_year, predict(lm.step, newdata=test.df))
+```
+
+
+```{r, cache=TRUE}
+set.seed(139)
+# model comparison
+RMSE.df = data.frame(trainRMSE = c(baseline.trainRMSE,
+                                   lmfull.trainRMSE,
+                                   lmfullinteraction.trainRMSE,
+                                   ridgesfull.trainRMSE,
+                                   ridgesfullinteraction.trainRMSE,
+                                   lassosfull.trainRMSE,
+                                   lassosfullinteraction.trainRMSE,
+                                   lmstep.trainRMSE),
+                     testRMSE = c(baseline.testRMSE,
+                                   lmfull.testRMSE,
+                                   lmfullinteraction.testRMSE,
+                                   ridgesfull.testRMSE,
+                                   ridgesfullinteraction.testRMSE,
+                                   lassosfull.testRMSE,
+                                   lassosfullinteraction.testRMSE,
+                                   lmstep.testRMSE),
+                     trainR2 = c(baseline.trainR2,
+                                   lmfull.trainR2,
+                                   lmfullinteraction.trainR2,
+                                   ridgesfull.trainR2,
+                                   ridgesfullinteraction.trainR2,
+                                   lassosfull.trainR2,
+                                   lassosfullinteraction.trainR2,
+                                   lmstep.trainR2),
+                     testR2 = c(baseline.testR2,
+                                   lmfull.testR2,
+                                   lmfullinteraction.testR2,
+                                   ridgesfull.testR2,
+                                   ridgesfullinteraction.testR2,
+                                   lassosfull.testR2,
+                                   lassosfullinteraction.testR2,
+                                   lmstep.testR2))
+rownames(RMSE.df) <- c("baseline", "full", "full interaction",
+                       "ridge full", "ridge full interaction",
+                       "lasso full", "lasso full interaction",
+                       "step")
+RMSE.df
+```
+
+## Decision Tree/Random Forest
+```{r, cache=TRUE}
+set.seed(139)
+library(rpart)
+# Tree 1
+
+RMSE = function(y,yhat){
+  return(sqrt(mean((y-yhat)^2)))
+}
+
+test.df = subset(test.df, test.df$Tm != 'CLE')
+tree1 = rpart(formula(lm.full),data=train.df, control = list(minsplit=1,cp=0,maxdepth=20))
+yhat.tree1.train = predict(tree1)
+yhat.tree1.test = predict(tree1, newdata = test.df)
+RMSE.tree1.train = RMSE(train.df$W.L..next_year,yhat.tree1.train)
+RMSE.tree1.test = RMSE(test.df$W.L..next_year,yhat.tree1.test)
+data.frame(train=RMSE.tree1.train,test=RMSE.tree1.test)
+```
+
+```{r, cache=TRUE}
+set.seed(139)
+# Tree prune
+best.cp = tree1$cptable[,"CP"][which.min(tree1$cptable[,"xerror"])]
+tree2 = prune(tree1,best.cp)
+yhat.tree2.train = predict(tree2)
+yhat.tree2.test = predict(tree2,newdata=test.df)
+RMSE.tree2.train = RMSE(train.df$W.L..next_year,yhat.tree2.train)
+RMSE.tree2.test = RMSE(test.df$W.L..next_year,yhat.tree2.test)
+data.frame(train=RMSE.tree2.train,test=RMSE.tree2.test)
+```
+
+```{r, cache=TRUE}
+set.seed(139)
+library(randomForest)
+# Bag model
+
+maxnodes = c(100,200,500)
+ntree= 200
+rmses.bag = rep(NA,length(maxnodes))
+bestRMSE = sd(train.df$W.L..next_year)
+
+for(i in 1:length(maxnodes)){
+  bagtemp = randomForest(formula(lm.full),data=train.df,
+                        mtry=56, maxnodes=maxnodes[i], ntree=ntree)
+  rmses.bag[i]=RMSE(train.df$W.L..next_year, bagtemp$predicted)
+  if(rmses.bag[i]<bestRMSE){
+    best_maxnodes = maxnodes[i]
+    bestRMSE=rmses.bag[i]
+    bag=bagtemp
+  }
+}
+data.frame(maxnodes=maxnodes, RMSE=rmses.bag)
+
+yhat.bag.train = predict(bag)
+yhat.bag.test = predict(bag, newdata = test.df)
+RMSE.bag.train = RMSE(train.df$W.L..next_year,yhat.bag.train)
+RMSE.bag.test = RMSE(test.df$W.L..next_year,yhat.bag.test)
+data.frame(train=RMSE.bag.train,test=RMSE.bag.test)
+```
+
+```{r, cache=TRUE}
+library(randomForest)
+# Random forest model 1
+set.seed(139)
+maxnodes = c(100,200,500)
+mtry = c(15, 25, 35, 45, 55)
+ntree=200
+pars = expand.grid(maxnodes=maxnodes,mtry=mtry)
+RMSEs = rep(NA,nrow(pars))
+bestRMSE = sd(train.df$W.L..next_year)
+
+for(i in 1:nrow(pars)){
+  rftemp = randomForest(formula(lm.full),data=train.df,
+                        mtry=pars$mtry[i], maxnodes=pars$maxnodes[i], ntree=ntree)
+  RMSEs[i]=RMSE(train.df$W.L..next_year, rftemp$predicted)
+  if(RMSEs[i]<bestRMSE){
+    best_maxnodes = maxnodes[i]
+    bestRMSE=RMSEs[i]
+    rf1=rftemp
+  }
+}
+data.frame(maxnodes=pars$maxnodes,mtry=pars$mtry,RMSE=RMSEs)
+pars[which(RMSEs==bestRMSE),]
+
+yhat.rf1.train = predict(rf1)
+yhat.rf1.test = predict(rf1, newdata = test.df)
+RMSE.rf1.train = RMSE(train.df$W.L..next_year,yhat.rf1.train)
+RMSE.rf1.test = RMSE(test.df$W.L..next_year,yhat.rf1.test)
+data.frame(train=RMSE.rf1.train,test=RMSE.rf1.test)
+importance(rf1)
+```
+
+```{r, cache=TRUE}
+library(randomForest)
+# Random forest model 2
+set.seed(139)
+maxnodes = c(100,200,500)
+mtry = c(1,3,5)
+ntree=200
+pars = expand.grid(maxnodes=maxnodes,mtry=mtry)
+RMSEs = rep(NA,nrow(pars))
+bestRMSE = sd(train.df$W.L..next_year)
+
+for(i in 1:nrow(pars)){
+  rftemp = randomForest(W.L..next_year ~ W.L..same_year + WHIP + H9 + SV + tot_fa_war3, data=train.df,
+                        mtry=pars$mtry[i], maxnodes=pars$maxnodes[i], ntree=ntree)
+  RMSEs[i]=RMSE(train.df$W.L..next_year, rftemp$predicted)
+  if(RMSEs[i]<bestRMSE){
+    best_maxnodes = maxnodes[i]
+    bestRMSE=RMSEs[i]
+    rf2=rftemp
+  }
+}
+data.frame(maxnodes=pars$maxnodes,mtry=pars$mtry,RMSE=RMSEs)
+pars[which(RMSEs==bestRMSE),]
+
+yhat.rf2.train = predict(rf2)
+yhat.rf2.test = predict(rf2, newdata = test.df)
+RMSE.rf2.train = RMSE(train.df$W.L..next_year,yhat.rf2.train)
+RMSE.rf2.test = RMSE(test.df$W.L..next_year,yhat.rf2.test)
+data.frame(train=RMSE.rf2.train,test=RMSE.rf2.test)
+importance(rf2)
+```
+
+```{r, cache=TRUE}
+set.seed(139)
+tree3 = rpart(W.L..next_year ~ W.L..same_year + WHIP + H9 + SV + tot_fa_war3,
+              data=train.df, control = list(minsplit=1, cp=0, maxdepth=20))
+yhat.tree3.train = predict(tree3)
+yhat.tree3.test = predict(tree3, newdata = test.df)
+RMSE.tree3.train = RMSE(train.df$W.L..next_year,yhat.tree3.train)
+RMSE.tree3.test = RMSE(test.df$W.L..next_year,yhat.tree3.test)
+data.frame(train=RMSE.tree3.train,test=RMSE.tree3.test)
+```
+```{r, cache=TRUE}
+# Pruning
+set.seed(139)
+best.cp = tree3$cptable[,"CP"][which.min(tree3$cptable[,"xerror"])]
+tree4 = prune(tree3,best.cp)
+yhat.tree4.train = predict(tree4)
+yhat.tree4.test = predict(tree4,newdata=test.df)
+RMSE.tree4.train = RMSE(train.df$W.L..next_year,yhat.tree4.train)
+RMSE.tree4.test = RMSE(test.df$W.L..next_year,yhat.tree4.test)
+data.frame(train=RMSE.tree4.train,test=RMSE.tree4.test)
+```
+
+```{r, cache=TRUE}
+library(randomForest)
+set.seed(139)
+samp = sample(nrow(train.df),100)
+dummy_df = train.df[samp,]
+dummyx = seq(0,100,1)
+plot(W.L..next_year~W.L..same_year, data=train.df,cex=0.8,pch=16,col=rgb(0.5,0.5,0.5,0.3))
+yhats = matrix(NA,nrow=nrow(dummy_df),ncol=length(dummyx))
+yhats.rf=matrix(NA,nrow=nrow(dummy_df),ncol=length(dummyx))
+for(i in 1:nrow(dummy_df)){
+  rows=dummy_df[rep(i,length(dummyx)),]
+  rows$W.L..same_year=dummyx
+  yhat = predict(tree4,new=rows)
+  lines(yhat~dummyx,col=rgb(0.5,0,0,0.5),lwd=0.5,lty=2:3)
+  yhats[i,]=yhat
+  yhat.rf = predict(rf2,new=rows)
+  lines(yhat.rf~dummyx,col=rgb(0,0.5,0,0.5),lwd=0.5,lty=2:3)
+  yhats.rf[i,]=yhat.rf
+}
+mean_yhat = apply(yhats,2,mean)
+mean_yhat.rf = apply(yhats.rf,2,mean)
+lines(mean_yhat~dummyx,col=rgb(0.5,0,0,1),lwd=3)
+lines(mean_yhat.rf~dummyx,col=rgb(0,0.5,0,1),lwd=3)
+```
+```{r, cache=TRUE}
+library(randomForest)
+set.seed(139)
+samp = sample(nrow(train.df),100)
+dummy_df = train.df[samp,]
+dummyx = seq(1,2,.01)
+plot(W.L..next_year~WHIP, data=train.df,cex=0.8,pch=16,col=rgb(0.5,0.5,0.5,0.3))
+yhats = matrix(NA,nrow=nrow(dummy_df),ncol=length(dummyx))
+yhats.rf=matrix(NA,nrow=nrow(dummy_df),ncol=length(dummyx))
+for(i in 1:nrow(dummy_df)){
+  rows=dummy_df[rep(i,length(dummyx)),]
+  rows$WHIP=dummyx
+  yhat = predict(tree4,new=rows)
+  lines(yhat~dummyx,col=rgb(0.5,0,0,0.5),lwd=0.5,lty=2:3)
+  yhats[i,]=yhat
+  yhat.rf = predict(rf2,new=rows)
+  lines(yhat.rf~dummyx,col=rgb(0,0.5,0,0.5),lwd=0.5,lty=2:3)
+  yhats.rf[i,]=yhat.rf
+}
+mean_yhat = apply(yhats,2,mean)
+mean_yhat.rf = apply(yhats.rf,2,mean)
+lines(mean_yhat~dummyx,col=rgb(0.5,0,0,1),lwd=3)
+lines(mean_yhat.rf~dummyx,col=rgb(0,0.5,0,1),lwd=3)
+```
+
+```{r, cache=TRUE}
+library(randomForest)
+set.seed(139)
+samp = sample(nrow(train.df),100)
+dummy_df = train.df[samp,]
+dummyx = seq(0,100,1)
+plot(W.L..next_year~W.L..same_year, data=train.df,cex=0.8,pch=16,col=rgb(0.5,0.5,0.5,0.3))
+yhats = matrix(NA,nrow=nrow(dummy_df),ncol=length(dummyx))
+yhats.rf=matrix(NA,nrow=nrow(dummy_df),ncol=length(dummyx))
+for(i in 1:nrow(dummy_df)){
+  rows=dummy_df[rep(i,length(dummyx)),]
+  rows$W.L..same_year=dummyx
+  yhat = predict(bag,new=rows)
+  lines(yhat~dummyx,col=rgb(0.5,0,0,0.5),lwd=0.5,lty=2:3)
+  yhats[i,]=yhat
+  yhat.rf = predict(rf1,new=rows)
+  lines(yhat.rf~dummyx,col=rgb(0,0.5,0,0.5),lwd=0.5,lty=2:3)
+  yhats.rf[i,]=yhat.rf
+}
+mean_yhat = apply(yhats,2,mean)
+mean_yhat.rf = apply(yhats.rf,2,mean)
+lines(mean_yhat~dummyx,col=rgb(0.5,0,0,1),lwd=3)
+lines(mean_yhat.rf~dummyx,col=rgb(0,0.5,0,1),lwd=3)
+```
+
+```{r, cache=TRUE}
+library(randomForest)
+set.seed(139)
+samp = sample(nrow(train.df),100)
+dummy_df = train.df[samp,]
+dummyx = seq(1,2,.01)
+plot(W.L..next_year~WHIP, data=train.df,cex=0.8,pch=16,col=rgb(0.5,0.5,0.5,0.3))
+yhats = matrix(NA,nrow=nrow(dummy_df),ncol=length(dummyx))
+yhats.rf=matrix(NA,nrow=nrow(dummy_df),ncol=length(dummyx))
+for(i in 1:nrow(dummy_df)){
+  rows=dummy_df[rep(i,length(dummyx)),]
+  rows$WHIP=dummyx
+  yhat = predict(bag,new=rows)
+  lines(yhat~dummyx,col=rgb(0.5,0,0,0.5),lwd=0.5,lty=2:3)
+  yhats[i,]=yhat
+  yhat.rf = predict(rf1,new=rows)
+  lines(yhat.rf~dummyx,col=rgb(0,0.5,0,0.5),lwd=0.5,lty=2:3)
+  yhats.rf[i,]=yhat.rf
+}
+mean_yhat = apply(yhats,2,mean)
+mean_yhat.rf = apply(yhats.rf,2,mean)
+lines(mean_yhat~dummyx,col=rgb(0.5,0,0,1),lwd=3)
+lines(mean_yhat.rf~dummyx,col=rgb(0,0.5,0,1),lwd=3)
+```
+
+```{r}
+# Variable importance for rf1 and rf2
+set.seed(139)
+barplot(sort(tree2$variable.importance),horiz = T,las=2,cex.names = 0.4, main='Variable Importance for tree2')
+varImpPlot(bag, cex=0.5, main='Variable Importance for bag')
+varImpPlot(rf1,cex=0.5, main='Variable Importance for rf1')
+
+barplot(sort(tree4$variable.importance),horiz = T,las=2,cex.names = 0.6, main='Variable Importance for tree4')
+varImpPlot(rf2, cex=0.5, main='Variable Importance for rf2')
+```
+
+```{r, cache=TRUE}
+# RMSEs of Trees
+set.seed(139)
+tab <- matrix(c(RMSE.tree1.train, RMSE.tree1.test,
+  RMSE.tree2.train, RMSE.tree2.test,
+  RMSE.bag.train, RMSE.bag.test,
+  RMSE.rf1.train, RMSE.rf1.test,
+  RMSE.rf2.train, RMSE.rf2.test,
+  RMSE.tree4.train, RMSE.tree4.test), nrow=6, byrow = TRUE
+)
+colnames(tab) <- c('train','test')
+rownames(tab) <- c('tree1','tree2','bag', 'rf1', 'rf2', 'tree4')
+tab <- as.table(tab)
+tab
+```
+
+## Mixed Effects Models
+
+```{r, cache=TRUE}
+set.seed(139)
+library(lme4)
+
+
+# for (i in 1997:2022){
+#   lmer_model <- lmer(team_data[[i]]$W.L.~poly(team_data[[i]]$BatAge, 2, raw = TRUE) + (1 + poly(team_data[[i]]$BatAge, 2, raw = TRUE) || team_data[[i]]$Tm), weights = team_data[[i]]$G)
+#   summary(lmer_model)
+# }
+
+lmer_model <- lmer(train.df$W.L..next_year ~ poly(train.df$Age.bat, 2, raw = FALSE) + (1 + poly(train.df$Age.bat, 2, raw = FALSE) || train.df$Tm))
+summary(lmer_model)
+
+lmer_model <- lmer(train.df$W.L..next_year ~ poly(train.df$BA, 2, raw = FALSE) + (1 + poly(train.df$BA, 2, raw = FALSE) || train.df$Tm))
+summary(lmer_model)
+
+# lmer_model <- lmer(W.L..next_year ~ Age.bat + PA + AB + H.bat + X2B + X3B + 
+                # HR.bat + SB + CS + BB.bat + SO.bat + BA + OBP + SLG + OPS + OPSplus +
+                # TB + GDP + HBP.bat + SH + SF + IBB.bat + Age.pitch + W.L..same_year +
+                # GF + SHO + SV + IP + H.pitch + HR.pitch + 
+                # BB.pitch + IBB.pitch + SO.pitch + HBP.pitch + BK + WP + BF +
+                # FIP + WHIP + H9 + HR9 + BB9 + SO9 + SO.W + 
+                # G + Inn + Ch + PO + A + E + DP + Fld. + 
+                # RF.9 + RF.G + tot_fa_war3 + num_fas || Tm, data = train.df, verbose=TRUE)
+```
+
+
+**RIDGE full**
+```{r, cache=TRUE}
+set.seed(139)
+lmer.varmodel <- lmer(W.L..next_year ~ OBP + Fld. + SLG + OPS + WHIP + (1 + OBP + Fld. + SLG + OPS + WHIP | Tm) , data = train.df)
+RMSE(train.df$W.L..next_year, predict(lmer.varmodel))
+RMSE(test.df$W.L..next_year, predict(lmer.varmodel, newdata=test.df))
+```
+
+
+```{r, cache=TRUE}
+set.seed(139)
+# lmer.varmodel <- lmer(W.L..next_year ~ OBP + SLG + OPS + SHO + Fld. + (1 + OBP + SLG + OPS + SHO + Fld. | Tm) , data = train.df)
+# RMSE(train.df$W.L..next_year, predict(lmer.varmodel))
+# RMSE(test.df$W.L..next_year, predict(lmer.varmodel, newdata=test.df))
+```
+
+```{r, cache=TRUE}
+set.seed(139)
+lmer.varmodel <- lmer(W.L..next_year ~ OBP + Fld. + SLG + OPS + WHIP + (1 | Tm), data = train.df)
+RMSE(train.df$W.L..next_year, predict(lmer.varmodel))
+RMSE(test.df$W.L..next_year, predict(lmer.varmodel, newdata=test.df))
+```
+
+**RIDGE full interaction**
+```{r, cache=TRUE}
+set.seed(139)
+lmer.varmodel <- lmer(W.L..next_year ~ Fld. + BA:OBP + OBP:Fld. + OBP:SLG + OBP + (1 + Fld. + BA:OBP + OBP:Fld. + OBP:SLG + OBP | Tm) , data = train.df)
+RMSE(train.df$W.L..next_year, predict(lmer.varmodel))
+RMSE(test.df$W.L..next_year, predict(lmer.varmodel, newdata=test.df))
+```
+
+
+```{r, cache=TRUE}
+set.seed(139)
+lmer.varmodel <- lmer(W.L..next_year ~ Fld. + BA:OBP + OBP:Fld. + OBP:SLG + OBP + (1 | Tm) , data = train.df)
+RMSE(train.df$W.L..next_year, predict(lmer.varmodel))
+RMSE(test.df$W.L..next_year, predict(lmer.varmodel, newdata=test.df))
+```
+
+**LASSO full**
+
+```{r, cache=TRUE}
+set.seed(139)
+lmer.varmodel <- lmer(W.L..next_year ~ OBP + SLG + WHIP + Fld. + SHO + (1 + OBP + SLG + WHIP + Fld. + SHO | Tm) , data = train.df)
+RMSE(train.df$W.L..next_year, predict(lmer.varmodel))
+RMSE(test.df$W.L..next_year, predict(lmer.varmodel, newdata=test.df))
+summary(lmer.varmodel)
+```
+
+```{r, cache=TRUE}
+set.seed(139)
+lmer.varmodel <- lmer(W.L..next_year ~ OBP + SLG + WHIP + Fld. + SHO + (1 | Tm) , data = train.df)
+RMSE(train.df$W.L..next_year, predict(lmer.varmodel))
+RMSE(test.df$W.L..next_year, predict(lmer.varmodel, newdata=test.df))
+summary(lmer.varmodel)
+```
+
+**LASSO full interaction **
+```{r, cache=TRUE}
+set.seed(139)
+lmer.varmodel <- lmer(W.L..next_year ~ OBP:Fld. + SLG:Fld. + OBP + SH:SHO + IBB.pitch:BK + (1 + OBP:Fld. + SLG:Fld. + OBP + SH:SHO + IBB.pitch:BK | Tm) , data = train.df)
+RMSE(train.df$W.L..next_year, predict(lmer.varmodel))
+RMSE(test.df$W.L..next_year, predict(lmer.varmodel, newdata=test.df))
+```
+
+```{r, cache=TRUE}
+set.seed(139)
+lmer.varmodel <- lmer(W.L..next_year ~ OBP:Fld. + SLG:Fld. + OBP + SH:SHO + IBB.pitch:BK + (1 | Tm) , data = train.df)
+RMSE(train.df$W.L..next_year, predict(lmer.varmodel))
+RMSE(test.df$W.L..next_year, predict(lmer.varmodel, newdata=test.df))
+```
+
+**Step**
+```{r, cache=TRUE}
+set.seed(139)
+lmer.varmodel <- lmer(W.L..next_year ~ tot_fa_war3 + AB + PA + num_fas + X3B + (1 + tot_fa_war3 + AB + PA + num_fas + X3B | Tm) , data = train.df)
+RMSE(train.df$W.L..next_year, predict(lmer.varmodel))
+RMSE(test.df$W.L..next_year, predict(lmer.varmodel, newdata=test.df))
+```
+
+```{r, cache=TRUE}
+set.seed(139)
+lmer.varmodel <- lmer(W.L..next_year ~ tot_fa_war3 + AB + PA + num_fas + X3B + (1 | Tm), data = train.df)
+RMSE(train.df$W.L..next_year, predict(lmer.varmodel))
+RMSE(test.df$W.L..next_year, predict(lmer.varmodel, newdata=test.df))
+```
+
+**Random Forest 1 and Random Forest 2**
+```{r, cache=TRUE}
+set.seed(139)
+lmer.varmodel <- lmer(W.L..next_year ~ WHIP + FIP + H9 + SO.W + BB9 + (1 + WHIP + FIP + H9 + SO.W + BB9 | Tm), data = train.df)
+RMSE(train.df$W.L..next_year, predict(lmer.varmodel))
+RMSE(test.df$W.L..next_year, predict(lmer.varmodel, newdata=test.df))
+```
+
+```{r, cache=TRUE}
+set.seed(139)
+lmer.varmodel <- lmer(W.L..next_year ~ WHIP + FIP + H9 + SO.W + BB9 + (1 | Tm), data = train.df)
+RMSE(train.df$W.L..next_year, predict(lmer.varmodel))
+RMSE(test.df$W.L..next_year, predict(lmer.varmodel, newdata=test.df))
+```
+
+**Bag**
+```{r, cache=TRUE}
+set.seed(139)
+lmer.varmodel <- lmer(W.L..next_year ~ WHIP + W.L..same_year + H9 + tot_fa_war3 + SV + (1 + WHIP + W.L..same_year + H9 + tot_fa_war3 + SV | Tm), data = train.df)
+RMSE(train.df$W.L..next_year, predict(lmer.varmodel))
+RMSE(test.df$W.L..next_year, predict(lmer.varmodel, newdata=test.df))
+```
+
+```{r, cache=TRUE}
+set.seed(139)
+lmer.varmodel <- lmer(W.L..next_year ~ WHIP + W.L..same_year + H9 + tot_fa_war3 + SV + (1 | Tm), data = train.df)
+RMSE(train.df$W.L..next_year, predict(lmer.varmodel))
+RMSE(test.df$W.L..next_year, predict(lmer.varmodel, newdata=test.df))
+```
+
+**rf1** 
+```{r, cache=TRUE}
+set.seed(139)
+lmer.varmodel <- lmer(W.L..next_year ~ WHIP + W.L..same_year + H9 + FIP + tot_fa_war3 + (1 + WHIP + W.L..same_year + H9 + FIP + tot_fa_war3 | Tm), data = train.df)
+RMSE(train.df$W.L..next_year, predict(lmer.varmodel))
+RMSE(test.df$W.L..next_year, predict(lmer.varmodel, newdata=test.df))
+```
+
+```{r, cache=TRUE}
+set.seed(139)
+lmer.varmodel <- lmer(W.L..next_year ~ WHIP + W.L..same_year + H9 + FIP + tot_fa_war3 + (1 | Tm), data = train.df)
+RMSE(train.df$W.L..next_year, predict(lmer.varmodel))
+RMSE(test.df$W.L..next_year, predict(lmer.varmodel, newdata=test.df))
+```
+
+**Pruned Decision tree with 3 Predictors**
+```{r, cache=TRUE}
+set.seed(139)
+lmer.varmodel <- lmer(W.L..next_year ~ W.L..same_year + WHIP + Age.pitch | Tm , data = train.df)
+RMSE(train.df$W.L..next_year, predict(lmer.varmodel))
+RMSE(test.df$W.L..next_year, predict(lmer.varmodel, newdata=test.df))
+```
+
+```{r, cache=TRUE}
+set.seed(139)
+lmer.varmodel <- lmer(W.L..next_year ~ W.L..same_year + WHIP + Age.pitch + (1 + W.L..same_year + WHIP + Age.pitch | Tm) , data = train.df)
+RMSE(train.df$W.L..next_year, predict(lmer.varmodel))
+RMSE(test.df$W.L..next_year, predict(lmer.varmodel, newdata=test.df))
+```
+
+**Pruned Decision tree with all predictors**
+```{r, cache=TRUE}
+set.seed(139)
+lmer.varmodel <- lmer(W.L..next_year ~ W.L..same_year + WHIP + H9 | Tm , data = train.df)
+RMSE(train.df$W.L..next_year, predict(lmer.varmodel))
+RMSE(test.df$W.L..next_year, predict(lmer.varmodel, newdata=test.df))
+```
+
+```{r, cache=TRUE}
+set.seed(139)
+lmer.varmodel <- lmer(W.L..next_year ~ W.L..same_year + WHIP + H9 + (1 + W.L..same_year + WHIP + H9 | Tm) , data = train.df)
+RMSE(train.df$W.L..next_year, predict(lmer.varmodel))
+RMSE(test.df$W.L..next_year, predict(lmer.varmodel, newdata=test.df))
+```
+
+
+**Testing other possibly important variables**
+
+```{r, cache=TRUE}
+set.seed(139)
+lmer.varmodel <- lmer(W.L..next_year ~ W.L..same_year + WHIP + H9 + FIP + IBB.bat + (1 + W.L..same_year + WHIP + H9 + FIP + IBB.bat | Tm) , data = train.df)
+RMSE(train.df$W.L..next_year, predict(lmer.varmodel))
+RMSE(test.df$W.L..next_year, predict(lmer.varmodel, newdata=test.df))
+```
+
+```{r, cache=TRUE}
+set.seed(139)
+lmer.varmodel <- lmer(W.L..next_year ~ W.L..same_year + WHIP + H9 + SV + tot_fa_war3 + (1 + W.L..same_year + WHIP + H9 + SV + tot_fa_war3 | Tm) , data = train.df)
+RMSE(train.df$W.L..next_year, predict(lmer.varmodel))
+RMSE(test.df$W.L..next_year, predict(lmer.varmodel, newdata=test.df))
+```
+
+```{r, cache=TRUE}
+set.seed(139)
+lmer.varmodel <- lmer(W.L..next_year ~ W.L..same_year + WHIP + H9 + SV + tot_fa_war3 + (1 | Tm) , data = train.df)
+RMSE(train.df$W.L..next_year, predict(lmer.varmodel))
+RMSE(test.df$W.L..next_year, predict(lmer.varmodel, newdata=test.df))
+```
